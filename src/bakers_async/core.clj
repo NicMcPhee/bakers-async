@@ -1,6 +1,7 @@
 (ns bakers-async.core
   (:require [clojure.core.async :as async :refer :all
-             :exclude [map into reduce merge partition partition-by take]])
+             :exclude [map into reduce merge partition partition-by take]]
+            [clojure.edn :as edn])
   (:gen-class))
 
 (defn fib [n]
@@ -14,7 +15,7 @@
 (defn make-customer [id]
   (let [n (+ 30 (rand-int 10))
         customer (->Customer id n (atom nil) (atom nil))]
-    (add-watch (:fib-of-n customer) customer-id
+    (add-watch (:fib-of-n customer) id
                (fn [key atom old-value new-value]
                  (println (str "Customer " key " changed from " old-value " to " new-value "."))))
     customer))
@@ -24,15 +25,15 @@
   (reset! (:fib-of-n customer) value))
 
 (defn add-single-customer-to-channel [customer-id customers-channel]
-  (Thread/sleep (rand-int 1000))
+  (Thread/sleep (rand-int 100))
   (let [customer (make-customer customer-id)]
-    (println (str "Constructured customer: " customer))
+    ; (println (str "Constructured customer: " customer))
     (>!! customers-channel customer)))
 
 (defn add-customers-to-channel
   [num-customers customers-channel]
   (doseq [customer-id (range num-customers)]
-    (println (str "Adding customer " customer-id))
+    ; (println (str "Adding customer " customer-id))
     (add-single-customer-to-channel customer-id customers-channel))
   (close! customers-channel))
 
@@ -51,13 +52,39 @@
                  (println (str "Server " key " has now served " new-value "."))))
     server))
 
-(defn add-served-customer [server customer-id]
-  (set! (:customers-served server) conj customer-id))
+(defn add-served-customer [server customer-id n]
+  (swap! (:customers-served server) conj {:customer-id customer-id, :n n}))
 
 (defn make-servers [num-servers]
   (let [servers-channel (chan)]
     (doseq [id (range num-servers)]
-      (>!! servers-channel (make-server id)))))
+      (go
+        (>! servers-channel (make-server id))))
+    servers-channel))
+
+(defn serve
+  [server customer servers]
+  (let [fib-of-n (fib (:n customer))]
+    (set-fib-value customer fib-of-n)
+    (add-served-customer server (:id customer) (:n customer))
+    (go (>! servers server))
+    fib-of-n))
+
+(defn manage-bakery
+  [num-servers num-customers]
+  (let [customers (make-customers num-customers)
+        servers (make-servers num-servers)
+        pairs (async/map (fn [customer server]
+                           {:customer customer,
+                            :server server,
+                            :server-channel servers})
+                         [customers servers])]
+    (loop []
+      (when-let [{server :server, customer :customer, servers :server-channel}
+                 (<!! pairs)]
+        (go
+         (serve server customer servers))
+        (recur)))))
 
 (defn map-example []
   (let [size 1000
@@ -89,9 +116,10 @@
 
 
 (defn -main
-  "I don't do a whole lot ... yet."
-  [& args]
-  (println "Hello, World!"))
+  [num-servers num-customers]
+  (manage-bakery (edn/read-string num-servers)
+                 (edn/read-string num-customers))
+  (shutdown-agents))
 
 ; I'm not sure I need the thread thing. The following
 ; pegs all the cores quite nicely, which suggests that
@@ -100,6 +128,6 @@
 ;; (def hi-chan (chan))
 ;; (doseq [n (range 1000)]
 ;;   (go (>! hi-chan (str "hi " (fib (rem n 40))))))
-;; ; Then wait a while for everything to compute
+; Then wait a while for everything to compute
 ;; (close! hi-chan)
 ;; (<!! (async/into [] hi-chan))
